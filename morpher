@@ -6,13 +6,13 @@ import glob
 import json
 import os
 import re
-import shutil
 import signal
 import subprocess
 import sys
 import tempfile
 import textwrap
-from typing import List
+from typing import List, Optional
+
 
 class Backup:
     def prepare(self, target: str, src_args: List[str]):
@@ -45,21 +45,27 @@ class BorgArchive(Backup):
     def prepare(self, target: str, src_args: List[str]):
         mount_dest = os.path.join(target, "data")
         os.makedirs(mount_dest, exist_ok=True)
+        print(f"Mounting borg archive ::{self.name} to {mount_dest} ...")
         subprocess.check_call(
             [
                 "borg",
                 "mount",
                 f"::{self.name}",
                 mount_dest,
-            ]
+            ],
+            env=get_source_environ()
         )
         self.active_archive_mount = mount_dest
-        print(f"Mounted borg archive ::{self.name} to {mount_dest}")
+        print(f"Successfully mounted borg archive ::{self.name} to {mount_dest}")
+
+        global active_backup
+        active_backup = self
 
         fpath = os.path.join(target, "borg_info_archive.txt")
         with open(fpath, "wt") as f:
             info = subprocess.check_output(
                 ["borg", "info", f"::{self.name}"],
+                env=get_source_environ(),
                 text=True,
             )
             f.write(info)
@@ -69,15 +75,19 @@ class BorgArchive(Backup):
         with open(fpath, "wt") as f:
             info = subprocess.check_output(
                 ["borg", "info", "--json", f"::{self.name}"],
+                env=get_source_environ(),
                 text=True,
             )
             f.write(info)
-        print(f"Exported borg archive info of ::{self.name} as json file into {fpath}")
+        print(f"Exported borg archive info as json file into {fpath}")
 
     def cleanup(self):
-        subprocess.check_call(["borg", "umount", self.active_archive_mount])
+        subprocess.check_call(["borg", "umount", self.active_archive_mount], env=get_source_environ())
         print(f"Unmounted borg archive from {self.active_archive_mount}")
         self.active_archive_mount = None
+
+        global active_backup
+        active_backup = None
 
 
 class ResticSnapshot(Backup):
@@ -114,9 +124,11 @@ class ResticSnapshot(Backup):
 
     def prepare(self, target: str, src_args: List[str]):
         self.repo_mount_dest = tempfile.mkdtemp(prefix="restic-mount-")
+        print(f"Mounting restic repository to {self.repo_mount_dest} ...")
         self.active_repo_mount_process = subprocess.Popen(
             ["restic", "mount", self.repo_mount_dest],
             stdout=subprocess.PIPE,
+            env=get_source_environ(),
             text=True
         )
         i = 5
@@ -128,8 +140,11 @@ class ResticSnapshot(Backup):
             i -= 1
         if i <= 0:
             raise RuntimeError(f"Failed to mount restic repository to {self.repo_mount_dest}")
-        print(f"Mounted restic repository to {self.repo_mount_dest}")
+        print(f"Successfully mounted restic repository to {self.repo_mount_dest}")
         self.active_repo_mount = self.repo_mount_dest
+
+        global active_backup
+        active_backup = self
 
         snapshot_mount_dest = os.path.join(target, "data")
         os.makedirs(snapshot_mount_dest, exist_ok=True)
@@ -141,13 +156,14 @@ class ResticSnapshot(Backup):
                 snapshot_mount_dest,
             ]
         )
-        print(f"Mounted restic snapshot {self.short_id} to {snapshot_mount_dest}")
+        print(f"Successfully mounted restic snapshot {self.short_id} to {snapshot_mount_dest}")
         self.active_snapshot_mount = snapshot_mount_dest
 
         fpath = os.path.join(target, "restic_snapshot.txt")
         with open(fpath, "wt") as f:
             info = subprocess.check_output(
                 ["restic", "snapshots", f"{self.id}"],
+                env=get_source_environ(),
                 text=True,
             )
             f.write(info)
@@ -157,6 +173,7 @@ class ResticSnapshot(Backup):
         with open(fpath, "wt") as f:
             info = subprocess.check_output(
                 ["restic", "snapshots", "--json", f"{self.id}"],
+                env=get_source_environ(),
                 text=True,
             )
             f.write(info)
@@ -174,9 +191,12 @@ class ResticSnapshot(Backup):
         os.removedirs(self.active_repo_mount)
         self.active_repo_mount = None
 
+        global active_backup
+        active_backup = None
+
 
 def get_borg_archives():
-    raw = json.loads(subprocess.check_output(["borg", "list", "--json"]))
+    raw = json.loads(subprocess.check_output(["borg", "list", "--json"], env=get_source_environ()))
     archives = {}
     for a in raw["archives"]:
         ba = BorgArchive(**a)
@@ -185,12 +205,32 @@ def get_borg_archives():
 
 
 def get_restic_snapshots():
-    raw = json.loads(subprocess.check_output(["restic", "snapshots", "--json"]))
+    raw = json.loads(subprocess.check_output(["restic", "snapshots", "--json"], env=get_source_environ()))
     snapshots = {}
     for a in raw:
         s = ResticSnapshot(**a)
         snapshots[s.id] = s
     return snapshots
+
+
+def get_source_environ():
+    return get_morphed_environ("SRC")
+
+
+def get_destination_environ():
+    return get_morphed_environ("DEST")
+
+
+def get_morphed_environ(side):
+    new_environ = os.environ.copy()
+    for k in list(new_environ.keys()):
+        if k.startswith("MORPHER_"):
+            del new_environ[k]
+    for k, v in os.environ.items():
+        if k.startswith(f"MORPHER_{side}_"):
+            e = k.replace(f"MORPHER_{side}_", "")
+            new_environ[e] = v
+    return new_environ
 
 
 def parse_args():
@@ -239,6 +279,10 @@ def parse_args():
 
 
 def morph_repository(morpher_args: List[str], src_backups: List[Backup], src_args: List[str], dest_args: List[str]):
+    a = input("Proceed with morph? y/N ").strip().lower()
+    if a != "y" and a != "yes":
+        sys.exit(1)
+
     for src_backup in src_backups.values():
         with tempfile.TemporaryDirectory(prefix="backup-convert-") as target_dir:
             src_backup.prepare(target_dir, src_args)
@@ -262,7 +306,7 @@ def morph_backup_into_borg(morpher_args: List[str], src_backup: Backup, target: 
     ]
     args = [a for a in args if a is not None]
     print("  calling:", ' '.join(args))
-    r = subprocess.run(args, cwd=target)
+    r = subprocess.run(args, cwd=target, env=get_destination_environ())
     print("Borg finished with exit code:", r.returncode)
 
 
@@ -281,13 +325,16 @@ def morph_backup_into_restic(morpher_args: List[str], src_backup: Backup, target
     ]
     args = [a for a in args if a is not None]
     print("  calling:", ' '.join(args))
-    r = subprocess.run(args, cwd=target)
+    r = subprocess.run(args, cwd=target, env=get_destination_environ())
     print("restic finished with exit code:", r.returncode)
 
 
 def main():
     morpher_args, src_args, dest_args = parse_args()
     morpher_args.source, morpher_args.destination = morpher_args.mode.split("2")
+    print("Backup Morpher arguments:", morpher_args)
+    print("Source arguments:", src_args)
+    print("Destination arguments:", dest_args)
 
     if morpher_args.source == "borg":
         src_backups = get_borg_archives()
@@ -303,5 +350,17 @@ def main():
     morph_repository(morpher_args, src_backups, src_args, dest_args)
 
 
+active_backup: Optional[Backup] = None
+
+
+def exit_cleanup(signal, frame):
+    global active_backup
+    if active_backup:
+        active_backup.cleanup()
+    print("Aborted.", file=sys.stderr)
+    sys.exit(1)
+
+
 if __name__ == "__main__":
+    signal.signal(signal.SIGINT, exit_cleanup)
     main()

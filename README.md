@@ -8,9 +8,9 @@ as much as possible.
 Backup Morpher can take either Borg or restic repositories as source, and morph
 them into Borg or restic destination repositories, see different modes below.
 
-An interesting use case is to use this convertes similar to a
-`git-filter-branch` to manipulate the Borg archives while copying them into
-restic snapshots.
+An interesting use case is to use the Backup Morpher similar to a
+`git-filter-branch` to manipulate the backups while copying them into a new
+repository:
 
 * Accidentally backed-up your photo library or a big Linux ISO file from your
   Downloads folder? Simply exclude files larger than X bytes during the
@@ -97,6 +97,12 @@ docs on Environment Variables]. Take care of these environment variables when
 using a mode with the same tool as source and destination (`borg2borg` or
 `restic2restic`) - you can fall-back to command line arguments for both
 repositories.
+
+In cases where source and destination are the same, restic2restic or borg2borg,
+or simply to keep the environment variables clean, you can prefix them for the
+source with `MORPHER_SRC_` and for the destination with `MORPHER_DEST_`, e.g.,
+`MORPHER_SRC_RESTIC_REPOSITORY=/some/path/to/restic_repo`. Each variable is only
+passed to the respective process during source or destination operations.
 
 [Borg docs on Environment Variables]: https://borgbackup.readthedocs.io/en/stable/usage/general.html#environment-variables
 [restic docs on Environment Variables]: https://restic.readthedocs.io/en/latest/040_backup.html#environment-variables
