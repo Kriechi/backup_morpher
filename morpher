@@ -7,11 +7,12 @@ import json
 import os
 import re
 import signal
+import time
 import subprocess
 import sys
 import tempfile
 import textwrap
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 
 class Backup:
@@ -82,9 +83,12 @@ class BorgArchive(Backup):
         print(f"Exported borg archive info as json file into {fpath}")
 
     def cleanup(self):
-        subprocess.check_call(["borg", "umount", self.active_archive_mount], env=get_source_environ())
-        print(f"Unmounted borg archive from {self.active_archive_mount}")
-        self.active_archive_mount = None
+        try:
+            subprocess.check_call(["borg", "umount", self.active_archive_mount], env=get_source_environ())
+            print(f"Unmounted borg archive from {self.active_archive_mount}")
+            self.active_archive_mount = None
+        except:
+            print(f"Unmounting of borg archive from {self.active_archive_mount} failed. Ignoring.")
 
         global active_backup
         active_backup = None
@@ -108,10 +112,14 @@ class ResticSnapshot(Backup):
         self.__dict__.update(kwargs)
         self.name = self.short_id
 
-        m = re.match(r"(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})\.(\d+)(.+)", self.time)
+        m = re.match(r"(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(\.\d+)?(.+)", self.time)
         microseconds = m.groups()[6]
-        while len(microseconds) > 6:
-            microseconds = str(int(microseconds) // 10)
+        if microseconds:
+            microseconds = microseconds[1:]
+            while len(microseconds) > 6:
+                microseconds = str(int(microseconds) // 10)
+        else:
+            microseconds = "0"
 
         zone = m.groups()[7]
         if zone == "Z":
@@ -180,12 +188,16 @@ class ResticSnapshot(Backup):
         print(f"Exported restic snapshot info of {self.short_id} as json file into {fpath}")
 
     def cleanup(self):
-        subprocess.check_call(["umount", self.active_snapshot_mount])
-        print(f"Unmounted restic snapshot from {self.active_snapshot_mount}")
-        self.active_snapshot_mount = None
+        try:
+            subprocess.check_call(["umount", self.active_snapshot_mount])
+            print(f"Unmounted restic snapshot from {self.active_snapshot_mount}")
+            self.active_snapshot_mount = None
+        except:
+            print(f"Unmounting of restic snapshot from {self.active_repo_mount} failed. Ignoring.")
 
         self.active_repo_mount_process.send_signal(signal.SIGINT)
         self.active_repo_mount_process.wait(15) # give it some time to unmount and free fuse resources
+        time.sleep(2)
         self.active_repo_mount_process = None
 
         os.removedirs(self.active_repo_mount)
@@ -195,8 +207,11 @@ class ResticSnapshot(Backup):
         active_backup = None
 
 
-def get_borg_archives():
-    raw = json.loads(subprocess.check_output(["borg", "list", "--json"], env=get_source_environ()))
+def get_borg_archives(args, environ):
+    raw = json.loads(subprocess.check_output(
+        ["borg", "list", "--json"],
+        env=environ
+    ))
     archives = {}
     for a in raw["archives"]:
         ba = BorgArchive(**a)
@@ -204,8 +219,11 @@ def get_borg_archives():
     return archives
 
 
-def get_restic_snapshots():
-    raw = json.loads(subprocess.check_output(["restic", "snapshots", "--json"], env=get_source_environ()))
+def get_restic_snapshots(args, environ):
+    raw = json.loads(subprocess.check_output(
+        ["restic", "snapshots", "--json"],
+        env=environ
+    ))
     snapshots = {}
     for a in raw:
         s = ResticSnapshot(**a)
@@ -214,14 +232,14 @@ def get_restic_snapshots():
 
 
 def get_source_environ():
-    return get_morphed_environ("SRC")
+    return get_morpher_environ("SRC")
 
 
 def get_destination_environ():
-    return get_morphed_environ("DEST")
+    return get_morpher_environ("DEST")
 
 
-def get_morphed_environ(side):
+def get_morpher_environ(side):
     new_environ = os.environ.copy()
     for k in list(new_environ.keys()):
         if k.startswith("MORPHER_"):
@@ -253,6 +271,11 @@ def parse_args():
         action="store_true",
         help="read-only, do not create or change destination repository"
     )
+    parser.add_argument(
+        "-y", "--assume-yes",
+        action="store_true",
+        help="assume yes to morph all found backups"
+    )
 
     c = sys.argv.count("--")
     if c == 0:
@@ -278,28 +301,65 @@ def parse_args():
     return parsed_morpher_args, src_args, dest_args
 
 
-def morph_repository(morpher_args: List[str], src_backups: List[Backup], src_args: List[str], dest_args: List[str]):
-    a = input("Proceed with morph? y/N ").strip().lower()
-    if a != "y" and a != "yes":
-        sys.exit(1)
+def morph_repository(morpher_args: argparse.Namespace, src_backups: Dict[str, Backup], src_args: List[str], dest_args: List[str]):
+    if not morpher_args.assume_yes:
+        a = print(textwrap.dedent("""
+            Select source backups from valid options:
+              * numerical selection (1, 2, 3, ...) for a single backup
+              * numerical range selection (1-7, 21-23, 42-) for multiple neighbouring backups
+              * all available backups in the source repository (default or "all")
+        """))
+        a = input("Which backups should be morphed? ").strip().lower()
+        backups_to_morph = list(src_backups.values())
+        if not a or a == "all":
+            pass
+        elif a.isnumeric():
+            try:
+                n = int(a) - 1
+                if n >= 0 and n < len(backups_to_morph):
+                    backups_to_morph = [backups_to_morph[n]]
+                else:
+                    raise ValueError()
+            except:
+                print("Invalid option.")
+                sys.exit(1)
+        elif "-" in a:
+            try:
+                l, u = a.split("-", 1)
+                lower = int(l) - 1
+                upper = int(u) - 1
+                if lower >= 0 and lower < upper and upper < len(backups_to_morph):
+                    backups_to_morph = [backups_to_morph[lower:upper]]
+                else:
+                    raise ValueError()
+            except:
+                print("Invalid option.")
+                sys.exit(1)
 
-    for src_backup in src_backups.values():
+        a = input("Proceed with morph? y/N ").strip().lower()
+        if a != "y" and a != "yes":
+            sys.exit(1)
+
+    morpher_args.identifier = datetime.datetime.now().strftime('morphed_archive_%Y%m%dT%H%M%S')
+
+    for src_backup in backups_to_morph:
         with tempfile.TemporaryDirectory(prefix="backup-convert-") as target_dir:
             src_backup.prepare(target_dir, src_args)
             src_backup.morph(morpher_args, target_dir, dest_args)
             src_backup.cleanup()
 
 
-def morph_backup_into_borg(morpher_args: List[str], src_backup: Backup, target: str, dest_args: List[str]):
-    print(f"Morphing {src_backup.name} into new Borg archive...")
+def morph_backup_into_borg(morpher_args: argparse.Namespace, src_backup: Backup, target: str, dest_args: List[str]):
+    timestamp = src_backup.time.strftime('%Y-%m-%dT%H:%M:%S')
+    print(f"Morphing {src_backup.name} from {timestamp} into new Borg archive...")
     args = [
         "borg",
         "create",
         "--dry-run" if morpher_args.dry_run else None,
         "--stats",
         "--verbose",
-        f"--comment=morphed_archive",
-        f"--timestamp={src_backup.time.strftime('%Y-%m-%dT%H:%M:%S')}",
+        f"--comment={morpher_args.identifier}",
+        f"--timestamp={timestamp}",
         *dest_args,
         f"::{src_backup.name}",
         *[os.path.relpath(p, target) for p in glob.iglob(os.path.join(target, "data", "*"))],
@@ -310,16 +370,17 @@ def morph_backup_into_borg(morpher_args: List[str], src_backup: Backup, target: 
     print("Borg finished with exit code:", r.returncode)
 
 
-def morph_backup_into_restic(morpher_args: List[str], src_backup: Backup, target: str, dest_args: List[str]):
-    print(f"Morphing {src_backup.name} into new restic snapshot...")
+def morph_backup_into_restic(morpher_args:argparse.Namespace, src_backup: Backup, target: str, dest_args: List[str]):
+    timestamp = src_backup.time.strftime('%Y-%m-%d %H:%M:%S')
+    print(f"Morphing {src_backup.name} from {timestamp} into new restic snapshot...")
     args = [
         "restic",
         "backup",
         "--dry-run" if morpher_args.dry_run else None,
         "--verbose",
         "--with-atime",
-        f"--tag=morphed_archive",
-        f"--time={src_backup.time.strftime('%Y-%m-%d %H:%M:%S')}",
+        f"--tag={morpher_args.identifier}",
+        f"--time={timestamp}",
         *dest_args,
         *[os.path.relpath(p, target) for p in glob.iglob(os.path.join(target, "data", "*"))],
     ]
@@ -337,26 +398,30 @@ def main():
     print("Destination arguments:", dest_args)
 
     if morpher_args.source == "borg":
-        src_backups = get_borg_archives()
+        src_backups = get_borg_archives(src_args, get_source_environ())
     elif morpher_args.source == "restic":
-        src_backups = get_restic_snapshots()
-    print(f"Found {len(src_backups)} backups to morph.")
+        src_backups = get_restic_snapshots(src_args, get_source_environ())
+    print(f"Found {len(src_backups)} backups to morph from the source repository.")
 
     if morpher_args.destination == "borg":
-        pass
+        dest_backups = get_borg_archives(dest_args, get_destination_environ())
     elif morpher_args.destination == "restic":
-        pass
+        dest_backups = get_restic_snapshots(dest_args, get_destination_environ())
+    print(f"Found {len(dest_backups)} existing backups in the destination repository.")
 
     morph_repository(morpher_args, src_backups, src_args, dest_args)
 
 
-active_backup: Optional[Backup] = None
+active_backup = None
 
 
 def exit_cleanup(signal, frame):
     global active_backup
-    if active_backup:
-        active_backup.cleanup()
+    try:
+        if active_backup:
+            active_backup.cleanup()
+    except:
+        pass
     print("Aborted.", file=sys.stderr)
     sys.exit(1)
 
