@@ -306,7 +306,7 @@ def morph_repository(morpher_args: argparse.Namespace, src_backups: Dict[str, Ba
         a = print(textwrap.dedent("""
             Select source backups from valid options:
               * numerical selection (1, 2, 3, ...) for a single backup
-              * numerical range selection (1-7, 21-23, 42-) for multiple neighbouring backups
+              * numerical range selection (1-7, -7, 21-23, 42-) for multiple neighbouring backups
               * all available backups in the source repository (default or "all")
         """))
         a = input("Which backups should be morphed? ").strip().lower()
@@ -326,24 +326,36 @@ def morph_repository(morpher_args: argparse.Namespace, src_backups: Dict[str, Ba
         elif "-" in a:
             try:
                 l, u = a.split("-", 1)
-                lower = int(l) - 1
-                upper = int(u) - 1
-                if lower >= 0 and lower < upper and upper < len(backups_to_morph):
-                    backups_to_morph = [backups_to_morph[lower:upper]]
+
+                lower = 0
+                if l:
+                    lower = int(l) - 1
+
+                upper = len(backups_to_morph)
+                if u:
+                    upper = int(u) - 1
+
+                if lower >= 0 and lower < upper and upper <= len(backups_to_morph):
+                    backups_to_morph = backups_to_morph[lower:upper]
                 else:
-                    raise ValueError()
-            except:
-                print("Invalid option.")
+                    raise ValueError(f"value not within range: 0 <= {lower} <= {upper} <= {len(backups_to_morph)}")
+            except Exception as e:
+                print("Invalid option:", e)
                 sys.exit(1)
 
-        a = input("Proceed with morph? y/N ").strip().lower()
+        for b in backups_to_morph:
+            print(f"Backup {b.name} @ {b.time} selected.")
+
+        a = input(f"Proceed with morphing of {len(backups_to_morph)} backups? y/N ").strip().lower()
         if a != "y" and a != "yes":
             sys.exit(1)
 
     morpher_args.identifier = datetime.datetime.now().strftime('morphed_archive_%Y%m%dT%H%M%S')
 
-    for src_backup in backups_to_morph:
+    count = len(backups_to_morph)
+    for i, src_backup in enumerate(backups_to_morph):
         with tempfile.TemporaryDirectory(prefix="backup-convert-") as target_dir:
+            print(f"Morphing {i+1} out of {count} backups: {src_backup.name} @ {b.time} ...")
             src_backup.prepare(target_dir, src_args)
             src_backup.morph(morpher_args, target_dir, dest_args)
             src_backup.cleanup()
