@@ -107,6 +107,35 @@ passed to the respective process during source or destination operations.
 [Borg docs on Environment Variables]: https://borgbackup.readthedocs.io/en/stable/usage/general.html#environment-variables
 [restic docs on Environment Variables]: https://restic.readthedocs.io/en/latest/040_backup.html#environment-variables
 
+### Example: restic2restic
+
+```shell
+export GODEBUG=asyncpreemptoff=1
+export MORPHER_SRC_RESTIC_REPOSITORY=/external-disk/source_repo
+export MORPHER_SRC_RESTIC_PASSWORD_FILE=/external-disk/source_repo.pw
+export MORPHER_DEST_RESTIC_REPOSITORY=/external-disk/destination_repo
+export MORPHER_DEST_RESTIC_PASSWORD_FILE=/external-disk/destination_repo.pw
+./morpher restic2restic \
+  -- \
+  -- \
+  --exclude-file /external-disk/filter-excludes.txt \
+  --exclude-caches \
+  --no-cache \
+  --host some_new_hostname
+```
+
+### Example: borg2restic
+
+```shell
+restic init --repo /external-disk/destination_repo --password-file /external-disk/destination_repo.pw
+
+export MORPHER_SRC_BORG_REPOSITORY=/external-disk/source_repo
+export MORPHER_SRC_BORG_PASSPHRASE=super_s3cret!
+export MORPHER_DEST_RESTIC_REPOSITORY=/external-disk/destination_repo
+export MORPHER_DEST_RESTIC_PASSWORD_FILE=/external-disk/destination_repo.pw
+./morpher borg2restic --dry-run -- --exclude data/home/me/Downloads/bigfile.mp4
+```
+
 ## Related Reading
 
 ### Borg

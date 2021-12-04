@@ -12,7 +12,7 @@ import subprocess
 import sys
 import tempfile
 import textwrap
-from typing import Dict, List, Optional
+from typing import Dict, List
 
 
 class Backup:
@@ -239,19 +239,21 @@ def get_destination_environ():
     return get_morpher_environ("DEST")
 
 
-def get_morpher_environ(side):
+def get_morpher_environ(side: str):
+    assert side in ["SRC", "DEST"]
+    PREFIX = "MORPHER_"
     new_environ = os.environ.copy()
     for k in list(new_environ.keys()):
-        if k.startswith("MORPHER_"):
+        if k.startswith(PREFIX):
             del new_environ[k]
     for k, v in os.environ.items():
-        if k.startswith(f"MORPHER_{side}_"):
-            e = k.replace(f"MORPHER_{side}_", "")
+        if k.startswith(f"{PREFIX}{side}_"):
+            e = k.replace(f"{PREFIX}{side}_", "")
             new_environ[e] = v
     return new_environ
 
 
-def parse_args():
+def parse_args(argv):
     parser = argparse.ArgumentParser(
         formatter_class=argparse.RawTextHelpFormatter,
         epilog=textwrap.dedent("""
@@ -276,17 +278,22 @@ def parse_args():
         action="store_true",
         help="assume yes to morph all found backups"
     )
+    parser.add_argument(
+        "-b", "--backup_range",
+        action="store_true",
+        help="select the range of source backups to morph, numberical, e.g., 3, -7, 21-23, 42-, or 'all'"
+    )
 
-    c = sys.argv.count("--")
+    c = argv.count("--")
     if c == 0:
-        morpher_args = sys.argv[1:].copy()
+        morpher_args = argv[1:].copy()
         src_args = []
         dest_args = []
     elif c >= 1:
-        i = sys.argv.index("--")
-        morpher_args = sys.argv[1:i].copy()
+        i = argv.index("--")
+        morpher_args = argv[1:i].copy()
         src_args = []
-        dest_args = sys.argv[i+1:].copy()
+        dest_args = argv[i+1:].copy()
         if c == 2:
             i = dest_args.index("--")
             src_args = dest_args[:i]
@@ -301,51 +308,61 @@ def parse_args():
     return parsed_morpher_args, src_args, dest_args
 
 
-def morph_repository(morpher_args: argparse.Namespace, src_backups: Dict[str, Backup], src_args: List[str], dest_args: List[str]):
-    if not morpher_args.assume_yes:
-        a = print(textwrap.dedent("""
+def select_backup_range(morpher_args: argparse.Namespace, src_backups: Dict[str, Backup]):
+    backup_range = morpher_args.backup_range
+    if not backup_range:
+        print(textwrap.dedent("""
             Select source backups from valid options:
-              * numerical selection (1, 2, 3, ...) for a single backup
-              * numerical range selection (1-7, -7, 21-23, 42-) for multiple neighbouring backups
-              * all available backups in the source repository (default or "all")
+                * numerical selection (1, 2, 3, ...) for a single backup
+                * numerical range selection (1-7, -7, 21-23, 42-) for multiple neighbouring backups
+                * all available backups in the source repository (default or "all")
         """))
-        a = input("Which backups should be morphed? ").strip().lower()
-        backups_to_morph = list(src_backups.values())
-        if not a or a == "all":
-            pass
-        elif a.isnumeric():
-            try:
-                n = int(a) - 1
-                if n >= 0 and n < len(backups_to_morph):
-                    backups_to_morph = [backups_to_morph[n]]
-                else:
-                    raise ValueError()
-            except:
-                print("Invalid option.")
-                sys.exit(1)
-        elif "-" in a:
-            try:
-                l, u = a.split("-", 1)
+        backup_range = input("Which backups should be morphed? ").strip().lower()
 
-                lower = 0
-                if l:
-                    lower = int(l) - 1
+    backups_to_morph = list(src_backups.values())
+    if not backup_range or backup_range == "all":
+        pass
+    elif backup_range.isnumeric():
+        try:
+            n = int(backup_range) - 1
+            if n >= 0 and n < len(backups_to_morph):
+                backups_to_morph = [backups_to_morph[n]]
+            else:
+                raise ValueError()
+        except:
+            print("Invalid option.")
+            sys.exit(1)
+    elif "-" in backup_range:
+        try:
+            l, u = backup_range.split("-", 1)
+            print(f"{l=}, {u=}")
 
-                upper = len(backups_to_morph)
-                if u:
-                    upper = int(u) - 1
+            lower = 0
+            if l:
+                lower = int(l) - 1
 
-                if lower >= 0 and lower < upper and upper <= len(backups_to_morph):
-                    backups_to_morph = backups_to_morph[lower:upper]
-                else:
-                    raise ValueError(f"value not within range: 0 <= {lower} <= {upper} <= {len(backups_to_morph)}")
-            except Exception as e:
-                print("Invalid option:", e)
-                sys.exit(1)
+            upper = len(backups_to_morph)
+            if u:
+                upper = int(u)
 
-        for b in backups_to_morph:
-            print(f"Backup {b.name} @ {b.time} selected.")
+            if lower >= 0 and lower < upper and upper <= len(backups_to_morph):
+                backups_to_morph = backups_to_morph[lower:upper]
+            else:
+                raise ValueError(f"value not within range: 0 <= {lower} <= {upper} <= {len(backups_to_morph)}")
+        except Exception as e:
+            print("Invalid option:", e)
+            sys.exit(1)
 
+    return backups_to_morph
+
+
+def morph_repository(morpher_args: argparse.Namespace, src_backups: Dict[str, Backup], src_args: List[str], dest_args: List[str]):
+    backups_to_morph = select_backup_range(morpher_args, src_backups)
+
+    for b in backups_to_morph:
+        print(f"Backup {b.name} @ {b.time} selected.")
+
+    if not morpher_args.assume_yes:
         a = input(f"Proceed with morphing of {len(backups_to_morph)} backups? y/N ").strip().lower()
         if a != "y" and a != "yes":
             sys.exit(1)
@@ -403,7 +420,7 @@ def morph_backup_into_restic(morpher_args:argparse.Namespace, src_backup: Backup
 
 
 def main():
-    morpher_args, src_args, dest_args = parse_args()
+    morpher_args, src_args, dest_args = parse_args(sys.argv)
     morpher_args.source, morpher_args.destination = morpher_args.mode.split("2")
     print("Backup Morpher arguments:", morpher_args)
     print("Source arguments:", src_args)
